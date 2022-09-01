@@ -1,9 +1,10 @@
+const { appendFile } = require('fs/promises');
 const { rollup } = require('rollup');
 const commonjs = require('@rollup/plugin-commonjs');
 const { nodeResolve } = require('@rollup/plugin-node-resolve');
 const rollupReplace = require('@rollup/plugin-replace');
 const rollupAlias = require('@rollup/plugin-alias');
-const { appendFile } = require('fs/promises');
+const rollupCleanup = require('rollup-plugin-cleanup');
 
 queueMicrotask(main);
 
@@ -27,6 +28,11 @@ async function main() {
       rollupReplace({
         values: { 'process.env.NODE_ENV': '""' },
         preventAssignment: true,
+      }),
+      // remove jsdoc to prevent deno do type imports
+      // TODO preserve copyrights
+      rollupCleanup({
+        sourcemap: false,
       }),
     ],
   });
