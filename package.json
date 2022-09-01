@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "dependencies": {
+    "vue": "3.2.38",
+    "rollup": "2.79.0",
+    "@rollup/plugin-commonjs": "22.0.2",
+    "@rollup/plugin-node-resolve": "13.3.0",
+    "@rollup/plugin-replace": "4.0.0",
+    "@rollup/plugin-alias": "3.1.9"
+  }
+}
