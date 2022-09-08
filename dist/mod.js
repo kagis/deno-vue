@@ -710,6 +710,7 @@ function requireLib () {
 	  DeclarationMissingInitializer: ({
 	    kind
 	  }) => `Missing initializer in ${kind} declaration.`,
+	  DecoratorArgumentsOutsideParentheses: "Decorator arguments must be moved inside parentheses: use '@(decorator(args))' instead of '@(decorator)(args)'.",
 	  DecoratorBeforeExport: "Decorators must be placed *before* the 'export' keyword. You can set the 'decoratorsBeforeExport' option to false to use the 'export @decorator class {}' syntax.",
 	  DecoratorConstructor: "Decorators can't be used with a constructor. Did you mean '@dec class { ... }'?",
 	  DecoratorExportClass: "Using the export keyword between a decorator and a class is not allowed. Please use `export @dec class` instead.",
@@ -1982,6 +1983,184 @@ function requireLib () {
 	      CLASS_ELEMENT_INSTANCE_GETTER = CLASS_ELEMENT_KIND_GETTER,
 	      CLASS_ELEMENT_INSTANCE_SETTER = CLASS_ELEMENT_KIND_SETTER,
 	      CLASS_ELEMENT_OTHER = 0;
+	class Scope {
+	  constructor(flags) {
+	    this.var = new Set();
+	    this.lexical = new Set();
+	    this.functions = new Set();
+	    this.flags = flags;
+	  }
+	}
+	class ScopeHandler {
+	  constructor(parser, inModule) {
+	    this.parser = void 0;
+	    this.scopeStack = [];
+	    this.inModule = void 0;
+	    this.undefinedExports = new Map();
+	    this.parser = parser;
+	    this.inModule = inModule;
+	  }
+	  get inFunction() {
+	    return (this.currentVarScopeFlags() & SCOPE_FUNCTION) > 0;
+	  }
+	  get allowSuper() {
+	    return (this.currentThisScopeFlags() & SCOPE_SUPER) > 0;
+	  }
+	  get allowDirectSuper() {
+	    return (this.currentThisScopeFlags() & SCOPE_DIRECT_SUPER) > 0;
+	  }
+	  get inClass() {
+	    return (this.currentThisScopeFlags() & SCOPE_CLASS) > 0;
+	  }
+	  get inClassAndNotInNonArrowFunction() {
+	    const flags = this.currentThisScopeFlags();
+	    return (flags & SCOPE_CLASS) > 0 && (flags & SCOPE_FUNCTION) === 0;
+	  }
+	  get inStaticBlock() {
+	    for (let i = this.scopeStack.length - 1;; i--) {
+	      const {
+	        flags
+	      } = this.scopeStack[i];
+	      if (flags & SCOPE_STATIC_BLOCK) {
+	        return true;
+	      }
+	      if (flags & (SCOPE_VAR | SCOPE_CLASS)) {
+	        return false;
+	      }
+	    }
+	  }
+	  get inNonArrowFunction() {
+	    return (this.currentThisScopeFlags() & SCOPE_FUNCTION) > 0;
+	  }
+	  get treatFunctionsAsVar() {
+	    return this.treatFunctionsAsVarInScope(this.currentScope());
+	  }
+	  createScope(flags) {
+	    return new Scope(flags);
+	  }
+	  enter(flags) {
+	    this.scopeStack.push(this.createScope(flags));
+	  }
+	  exit() {
+	    this.scopeStack.pop();
+	  }
+	  treatFunctionsAsVarInScope(scope) {
+	    return !!(scope.flags & (SCOPE_FUNCTION | SCOPE_STATIC_BLOCK) || !this.parser.inModule && scope.flags & SCOPE_PROGRAM);
+	  }
+	  declareName(name, bindingType, loc) {
+	    let scope = this.currentScope();
+	    if (bindingType & BIND_SCOPE_LEXICAL || bindingType & BIND_SCOPE_FUNCTION) {
+	      this.checkRedeclarationInScope(scope, name, bindingType, loc);
+	      if (bindingType & BIND_SCOPE_FUNCTION) {
+	        scope.functions.add(name);
+	      } else {
+	        scope.lexical.add(name);
+	      }
+	      if (bindingType & BIND_SCOPE_LEXICAL) {
+	        this.maybeExportDefined(scope, name);
+	      }
+	    } else if (bindingType & BIND_SCOPE_VAR) {
+	      for (let i = this.scopeStack.length - 1; i >= 0; --i) {
+	        scope = this.scopeStack[i];
+	        this.checkRedeclarationInScope(scope, name, bindingType, loc);
+	        scope.var.add(name);
+	        this.maybeExportDefined(scope, name);
+	        if (scope.flags & SCOPE_VAR) break;
+	      }
+	    }
+	    if (this.parser.inModule && scope.flags & SCOPE_PROGRAM) {
+	      this.undefinedExports.delete(name);
+	    }
+	  }
+	  maybeExportDefined(scope, name) {
+	    if (this.parser.inModule && scope.flags & SCOPE_PROGRAM) {
+	      this.undefinedExports.delete(name);
+	    }
+	  }
+	  checkRedeclarationInScope(scope, name, bindingType, loc) {
+	    if (this.isRedeclaredInScope(scope, name, bindingType)) {
+	      this.parser.raise(Errors.VarRedeclaration, {
+	        at: loc,
+	        identifierName: name
+	      });
+	    }
+	  }
+	  isRedeclaredInScope(scope, name, bindingType) {
+	    if (!(bindingType & BIND_KIND_VALUE)) return false;
+	    if (bindingType & BIND_SCOPE_LEXICAL) {
+	      return scope.lexical.has(name) || scope.functions.has(name) || scope.var.has(name);
+	    }
+	    if (bindingType & BIND_SCOPE_FUNCTION) {
+	      return scope.lexical.has(name) || !this.treatFunctionsAsVarInScope(scope) && scope.var.has(name);
+	    }
+	    return scope.lexical.has(name) && !(scope.flags & SCOPE_SIMPLE_CATCH && scope.lexical.values().next().value === name) || !this.treatFunctionsAsVarInScope(scope) && scope.functions.has(name);
+	  }
+	  checkLocalExport(id) {
+	    const {
+	      name
+	    } = id;
+	    const topLevelScope = this.scopeStack[0];
+	    if (!topLevelScope.lexical.has(name) && !topLevelScope.var.has(name) && !topLevelScope.functions.has(name)) {
+	      this.undefinedExports.set(name, id.loc.start);
+	    }
+	  }
+	  currentScope() {
+	    return this.scopeStack[this.scopeStack.length - 1];
+	  }
+	  currentVarScopeFlags() {
+	    for (let i = this.scopeStack.length - 1;; i--) {
+	      const {
+	        flags
+	      } = this.scopeStack[i];
+	      if (flags & SCOPE_VAR) {
+	        return flags;
+	      }
+	    }
+	  }
+	  currentThisScopeFlags() {
+	    for (let i = this.scopeStack.length - 1;; i--) {
+	      const {
+	        flags
+	      } = this.scopeStack[i];
+	      if (flags & (SCOPE_VAR | SCOPE_CLASS) && !(flags & SCOPE_ARROW)) {
+	        return flags;
+	      }
+	    }
+	  }
+	}
+	class FlowScope extends Scope {
+	  constructor(...args) {
+	    super(...args);
+	    this.declareFunctions = new Set();
+	  }
+	}
+	class FlowScopeHandler extends ScopeHandler {
+	  createScope(flags) {
+	    return new FlowScope(flags);
+	  }
+	  declareName(name, bindingType, loc) {
+	    const scope = this.currentScope();
+	    if (bindingType & BIND_FLAGS_FLOW_DECLARE_FN) {
+	      this.checkRedeclarationInScope(scope, name, bindingType, loc);
+	      this.maybeExportDefined(scope, name);
+	      scope.declareFunctions.add(name);
+	      return;
+	    }
+	    super.declareName(name, bindingType, loc);
+	  }
+	  isRedeclaredInScope(scope, name, bindingType) {
+	    if (super.isRedeclaredInScope(scope, name, bindingType)) return true;
+	    if (bindingType & BIND_FLAGS_FLOW_DECLARE_FN) {
+	      return !scope.declareFunctions.has(name) && (scope.lexical.has(name) || scope.functions.has(name));
+	    }
+	    return false;
+	  }
+	  checkLocalExport(id) {
+	    if (!this.scopeStack[0].declareFunctions.has(id.name)) {
+	      super.checkLocalExport(id);
+	    }
+	  }
+	}
 	class BaseParser {
 	  constructor() {
 	    this.sawUnambiguousESM = false;
@@ -2878,7 +3057,7 @@ function requireLib () {
 	    }
 	    if (next === 123 || next === 91 && this.hasPlugin("recordAndTuple")) {
 	      this.expectPlugin("recordAndTuple");
-	      if (this.getPluginOption("recordAndTuple", "syntaxType") !== "hash") {
+	      if (this.getPluginOption("recordAndTuple", "syntaxType") === "bar") {
 	        throw this.raise(next === 123 ? Errors.RecordExpressionHashIncorrectStartSyntaxType : Errors.TupleExpressionHashIncorrectStartSyntaxType, {
 	          at: this.state.curPosition()
 	        });
@@ -3644,184 +3823,6 @@ function requireLib () {
 	    };
 	  }
 	}
-	class Scope {
-	  constructor(flags) {
-	    this.var = new Set();
-	    this.lexical = new Set();
-	    this.functions = new Set();
-	    this.flags = flags;
-	  }
-	}
-	class ScopeHandler {
-	  constructor(parser, inModule) {
-	    this.parser = void 0;
-	    this.scopeStack = [];
-	    this.inModule = void 0;
-	    this.undefinedExports = new Map();
-	    this.parser = parser;
-	    this.inModule = inModule;
-	  }
-	  get inFunction() {
-	    return (this.currentVarScopeFlags() & SCOPE_FUNCTION) > 0;
-	  }
-	  get allowSuper() {
-	    return (this.currentThisScopeFlags() & SCOPE_SUPER) > 0;
-	  }
-	  get allowDirectSuper() {
-	    return (this.currentThisScopeFlags() & SCOPE_DIRECT_SUPER) > 0;
-	  }
-	  get inClass() {
-	    return (this.currentThisScopeFlags() & SCOPE_CLASS) > 0;
-	  }
-	  get inClassAndNotInNonArrowFunction() {
-	    const flags = this.currentThisScopeFlags();
-	    return (flags & SCOPE_CLASS) > 0 && (flags & SCOPE_FUNCTION) === 0;
-	  }
-	  get inStaticBlock() {
-	    for (let i = this.scopeStack.length - 1;; i--) {
-	      const {
-	        flags
-	      } = this.scopeStack[i];
-	      if (flags & SCOPE_STATIC_BLOCK) {
-	        return true;
-	      }
-	      if (flags & (SCOPE_VAR | SCOPE_CLASS)) {
-	        return false;
-	      }
-	    }
-	  }
-	  get inNonArrowFunction() {
-	    return (this.currentThisScopeFlags() & SCOPE_FUNCTION) > 0;
-	  }
-	  get treatFunctionsAsVar() {
-	    return this.treatFunctionsAsVarInScope(this.currentScope());
-	  }
-	  createScope(flags) {
-	    return new Scope(flags);
-	  }
-	  enter(flags) {
-	    this.scopeStack.push(this.createScope(flags));
-	  }
-	  exit() {
-	    this.scopeStack.pop();
-	  }
-	  treatFunctionsAsVarInScope(scope) {
-	    return !!(scope.flags & (SCOPE_FUNCTION | SCOPE_STATIC_BLOCK) || !this.parser.inModule && scope.flags & SCOPE_PROGRAM);
-	  }
-	  declareName(name, bindingType, loc) {
-	    let scope = this.currentScope();
-	    if (bindingType & BIND_SCOPE_LEXICAL || bindingType & BIND_SCOPE_FUNCTION) {
-	      this.checkRedeclarationInScope(scope, name, bindingType, loc);
-	      if (bindingType & BIND_SCOPE_FUNCTION) {
-	        scope.functions.add(name);
-	      } else {
-	        scope.lexical.add(name);
-	      }
-	      if (bindingType & BIND_SCOPE_LEXICAL) {
-	        this.maybeExportDefined(scope, name);
-	      }
-	    } else if (bindingType & BIND_SCOPE_VAR) {
-	      for (let i = this.scopeStack.length - 1; i >= 0; --i) {
-	        scope = this.scopeStack[i];
-	        this.checkRedeclarationInScope(scope, name, bindingType, loc);
-	        scope.var.add(name);
-	        this.maybeExportDefined(scope, name);
-	        if (scope.flags & SCOPE_VAR) break;
-	      }
-	    }
-	    if (this.parser.inModule && scope.flags & SCOPE_PROGRAM) {
-	      this.undefinedExports.delete(name);
-	    }
-	  }
-	  maybeExportDefined(scope, name) {
-	    if (this.parser.inModule && scope.flags & SCOPE_PROGRAM) {
-	      this.undefinedExports.delete(name);
-	    }
-	  }
-	  checkRedeclarationInScope(scope, name, bindingType, loc) {
-	    if (this.isRedeclaredInScope(scope, name, bindingType)) {
-	      this.parser.raise(Errors.VarRedeclaration, {
-	        at: loc,
-	        identifierName: name
-	      });
-	    }
-	  }
-	  isRedeclaredInScope(scope, name, bindingType) {
-	    if (!(bindingType & BIND_KIND_VALUE)) return false;
-	    if (bindingType & BIND_SCOPE_LEXICAL) {
-	      return scope.lexical.has(name) || scope.functions.has(name) || scope.var.has(name);
-	    }
-	    if (bindingType & BIND_SCOPE_FUNCTION) {
-	      return scope.lexical.has(name) || !this.treatFunctionsAsVarInScope(scope) && scope.var.has(name);
-	    }
-	    return scope.lexical.has(name) && !(scope.flags & SCOPE_SIMPLE_CATCH && scope.lexical.values().next().value === name) || !this.treatFunctionsAsVarInScope(scope) && scope.functions.has(name);
-	  }
-	  checkLocalExport(id) {
-	    const {
-	      name
-	    } = id;
-	    const topLevelScope = this.scopeStack[0];
-	    if (!topLevelScope.lexical.has(name) && !topLevelScope.var.has(name) && !topLevelScope.functions.has(name)) {
-	      this.undefinedExports.set(name, id.loc.start);
-	    }
-	  }
-	  currentScope() {
-	    return this.scopeStack[this.scopeStack.length - 1];
-	  }
-	  currentVarScopeFlags() {
-	    for (let i = this.scopeStack.length - 1;; i--) {
-	      const {
-	        flags
-	      } = this.scopeStack[i];
-	      if (flags & SCOPE_VAR) {
-	        return flags;
-	      }
-	    }
-	  }
-	  currentThisScopeFlags() {
-	    for (let i = this.scopeStack.length - 1;; i--) {
-	      const {
-	        flags
-	      } = this.scopeStack[i];
-	      if (flags & (SCOPE_VAR | SCOPE_CLASS) && !(flags & SCOPE_ARROW)) {
-	        return flags;
-	      }
-	    }
-	  }
-	}
-	class FlowScope extends Scope {
-	  constructor(...args) {
-	    super(...args);
-	    this.declareFunctions = new Set();
-	  }
-	}
-	class FlowScopeHandler extends ScopeHandler {
-	  createScope(flags) {
-	    return new FlowScope(flags);
-	  }
-	  declareName(name, bindingType, loc) {
-	    const scope = this.currentScope();
-	    if (bindingType & BIND_FLAGS_FLOW_DECLARE_FN) {
-	      this.checkRedeclarationInScope(scope, name, bindingType, loc);
-	      this.maybeExportDefined(scope, name);
-	      scope.declareFunctions.add(name);
-	      return;
-	    }
-	    super.declareName(name, bindingType, loc);
-	  }
-	  isRedeclaredInScope(scope, name, bindingType) {
-	    if (super.isRedeclaredInScope(scope, name, bindingType)) return true;
-	    if (bindingType & BIND_FLAGS_FLOW_DECLARE_FN) {
-	      return !scope.declareFunctions.has(name) && (scope.lexical.has(name) || scope.functions.has(name));
-	    }
-	    return false;
-	  }
-	  checkLocalExport(id) {
-	    if (!this.scopeStack[0].declareFunctions.has(id.name)) {
-	      super.checkLocalExport(id);
-	    }
-	  }
-	}
 	class ClassScope {
 	  constructor() {
 	    this.privateNames = new Set();
@@ -4304,7 +4305,7 @@ function requireLib () {
 	const NodePrototype = Node.prototype;
 	{
 	  NodePrototype.__clone = function () {
-	    const newNode = new Node();
+	    const newNode = new Node(undefined, this.start, this.loc.start);
 	    const keys = Object.keys(this);
 	    for (let i = 0, length = keys.length; i < length; i++) {
 	      const key = keys[i];
@@ -9233,7 +9234,7 @@ function requireLib () {
 	          return this.finishCallExpression(node, state.optionalChainMember);
 	        }
 	        const tokenType = this.state.type;
-	        if (tokenType === 48 || tokenType !== 10 && tokenCanStartExpression(tokenType) && !this.hasPrecedingLineBreak()) {
+	        if (tokenType === 48 || tokenType === 52 || tokenType !== 10 && tokenCanStartExpression(tokenType) && !this.hasPrecedingLineBreak()) {
 	          return;
 	        }
 	        const node = this.startNodeAt(startPos, startLoc);
@@ -10383,10 +10384,12 @@ function requireLib () {
 	      throw new Error("Cannot use the decorators and decorators-legacy plugin together");
 	    }
 	    const decoratorsBeforeExport = getPluginOption(plugins, "decorators", "decoratorsBeforeExport");
-	    if (decoratorsBeforeExport == null) {
-	      throw new Error("The 'decorators' plugin requires a 'decoratorsBeforeExport' option," + " whose value must be a boolean. If you are migrating from" + " Babylon/Babel 6 or want to use the old decorators proposal, you" + " should use the 'decorators-legacy' plugin instead of 'decorators'.");
-	    } else if (typeof decoratorsBeforeExport !== "boolean") {
+	    if (decoratorsBeforeExport != null && typeof decoratorsBeforeExport !== "boolean") {
 	      throw new Error("'decoratorsBeforeExport' must be a boolean.");
+	    }
+	    const allowCallParenthesized = getPluginOption(plugins, "decorators", "allowCallParenthesized");
+	    if (allowCallParenthesized != null && typeof allowCallParenthesized !== "boolean") {
+	      throw new Error("'allowCallParenthesized' must be a boolean.");
 	    }
 	  }
 	  if (hasPlugin(plugins, "flow") && hasPlugin(plugins, "typescript")) {
@@ -10434,8 +10437,8 @@ function requireLib () {
 	      }
 	    }
 	  }
-	  if (hasPlugin(plugins, "recordAndTuple") && !RECORD_AND_TUPLE_SYNTAX_TYPES.includes(getPluginOption(plugins, "recordAndTuple", "syntaxType"))) {
-	    throw new Error("'recordAndTuple' requires 'syntaxType' option whose value should be one of: " + RECORD_AND_TUPLE_SYNTAX_TYPES.map(p => `'${p}'`).join(", "));
+	  if (hasPlugin(plugins, "recordAndTuple") && getPluginOption(plugins, "recordAndTuple", "syntaxType") != null && !RECORD_AND_TUPLE_SYNTAX_TYPES.includes(getPluginOption(plugins, "recordAndTuple", "syntaxType"))) {
+	    throw new Error("The 'syntaxType' option of the 'recordAndTuple' plugin must be one of: " + RECORD_AND_TUPLE_SYNTAX_TYPES.map(p => `'${p}'`).join(", "));
 	  }
 	  if (hasPlugin(plugins, "asyncDoExpressions") && !hasPlugin(plugins, "doExpressions")) {
 	    const error = new Error("'asyncDoExpressions' requires 'doExpressions', please add 'doExpressions' to parser plugins.");
@@ -13067,17 +13070,29 @@ function requireLib () {
 	        expr = this.parseExpression();
 	        this.expect(11);
 	        expr = this.wrapParenthesis(startPos, startLoc, expr);
+	        const paramsStartLoc = this.state.startLoc;
+	        node.expression = this.parseMaybeDecoratorArguments(expr);
+	        if (this.getPluginOption("decorators", "allowCallParenthesized") === false && node.expression !== expr) {
+	          this.raise(Errors.DecoratorArgumentsOutsideParentheses, {
+	            at: paramsStartLoc
+	          });
+	        }
 	      } else {
 	        expr = this.parseIdentifier(false);
 	        while (this.eat(16)) {
 	          const node = this.startNodeAt(startPos, startLoc);
 	          node.object = expr;
-	          node.property = this.parseIdentifier(true);
+	          if (this.match(134)) {
+	            this.classScope.usePrivateName(this.state.value, this.state.startLoc);
+	            node.property = this.parsePrivateName();
+	          } else {
+	            node.property = this.parseIdentifier(true);
+	          }
 	          node.computed = false;
 	          expr = this.finishNode(node, "MemberExpression");
 	        }
+	        node.expression = this.parseMaybeDecoratorArguments(expr);
 	      }
-	      node.expression = this.parseMaybeDecoratorArguments(expr);
 	      this.state.decoratorStack.pop();
 	    } else {
 	      node.expression = this.parseExprSubscripts();
@@ -14236,7 +14251,7 @@ function requireLib () {
 	      const {
 	        specifiers
 	      } = node;
-	      if (node.specifiers != null) {
+	      if (specifiers != null) {
 	        const nonDefaultNamedSpecifier = specifiers.find(specifier => {
 	          let imported;
 	          if (specifier.type === "ExportSpecifier") {
@@ -26334,7 +26349,8 @@ function requireRuntimeCore_cjs () {
 		    }
 		    queueFlush();
 		}
-		function flushPreFlushCbs(seen, i = flushIndex) {
+		function flushPreFlushCbs(seen,
+		i = isFlushing ? flushIndex + 1 : 0) {
 		    {
 		        seen = seen || new Map();
 		    }
@@ -32185,7 +32201,8 @@ function requireRuntimeCore_cjs () {
 		    const Component = instance.type;
 		    if (!instance.render) {
 		        if (!isSSR && compile && !Component.render) {
-		            const template = Component.template;
+		            const template = Component.template ||
+		                resolveMergedOptions(instance).template;
 		            if (template) {
 		                {
 		                    startMeasure(instance, `compile`);
@@ -32651,7 +32668,7 @@ function requireRuntimeCore_cjs () {
 		    }
 		    return true;
 		}
-		const version = "3.2.38";
+		const version = "3.2.39";
 		const _ssrUtils = {
 		    createComponentInstance,
 		    setupComponent,
@@ -35781,9 +35798,13 @@ function requireServerRenderer_cjs () {
 	                attrs[slotScopeId.trim()] = '';
 	            }
 	            const prev = setCurrentRenderingInstance(instance);
-	            ssrRender(instance.proxy, push, instance, attrs,
-	            instance.props, instance.setupState, instance.data, instance.ctx);
-	            setCurrentRenderingInstance(prev);
+	            try {
+	                ssrRender(instance.proxy, push, instance, attrs,
+	                instance.props, instance.setupState, instance.data, instance.ctx);
+	            }
+	            finally {
+	                setCurrentRenderingInstance(prev);
+	            }
 	        }
 	        else if (instance.render && instance.render !== shared.NOOP) {
 	            renderVNode(push, (instance.subTree = renderComponentRoot(instance)), instance, slotScopeId);
