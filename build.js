@@ -1,4 +1,3 @@
-const { appendFile } = require('fs/promises');
 const { rollup } = require('rollup');
 const commonjs = require('@rollup/plugin-commonjs');
 const { nodeResolve } = require('@rollup/plugin-node-resolve');
@@ -6,7 +5,6 @@ const rollupReplace = require('@rollup/plugin-replace');
 const rollupAlias = require('@rollup/plugin-alias');
 const rollupCleanup = require('rollup-plugin-cleanup');
 
-queueMicrotask(main);
 
 async function main() {
   const bundle = await rollup({
@@ -14,7 +12,7 @@ async function main() {
     plugins: [
       rollupAlias({
         entries: [{
-          find: 'stream',
+          find: 'node:stream',
           replacement: './stream_stub.js',
         }],
       }),
@@ -24,7 +22,9 @@ async function main() {
           'node_modules/vue/server-renderer',
         ],
       }),
-      nodeResolve({ mainFields: ['main'] }),
+      nodeResolve({
+        exportConditions: ['node'],
+      }),
       rollupReplace({
         values: { 'process.env.NODE_ENV': '""' },
         preventAssignment: true,
@@ -41,6 +41,6 @@ async function main() {
     file: 'bundle.js',
     format: 'esm',
   });
-
-  await appendFile('bundle.js', 'var window;');
 }
+
+await main();
