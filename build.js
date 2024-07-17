@@ -5,6 +5,7 @@ const rollupReplace = require('@rollup/plugin-replace');
 const rollupAlias = require('@rollup/plugin-alias');
 const rollupCleanup = require('rollup-plugin-cleanup');
 
+queueMicrotask(main);
 
 async function main() {
   const bundle = await rollup({
@@ -42,5 +43,3 @@ async function main() {
     format: 'esm',
   });
 }
-
-await main();
